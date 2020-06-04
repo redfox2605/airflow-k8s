@@ -1,0 +1,86 @@
+# https://taskfile.dev
+
+version: '2'
+vars:
+  KUBE_CONTEXT: '{{default "minikube" .KUBE_CONTEXT}}'
+  ENV: '{{default "minikube" .ENV}}'
+env:
+  PROJECT_NAME: k8s-airflow
+  ENV: '{{.ENV}}'
+  NAMESPACE: '{{default "default" .NAMESPACE}}'
+
+tasks:
+
+  run.local:
+    cmds:
+      - >
+        task start.minikube;
+        eval $(minikube docker-env);
+        task docker.build;
+        task k8s.deploy.rolebinding;
+        task airflow.deploy;
+        task airflow.dags.deploy;
+
+  start.minikube:
+    cmds:
+      - if minikube status | grep Running; then echo "minikube running..."; else echo "starting minikube"; minikube start; fi
+
+  default:
+    cmds:
+      - echo 'executed on {{if ne .KUBE_CONTEXT "minikube"}}remote{{else}}local{{end}}'
+    silent: true
+
+  docker.build:
+    deps: [set.k8s.context]
+    cmds:
+      - docker build -t airflow:latest .
+      - '{{if ne .KUBE_CONTEXT "minikube"}}docker push airflow:latest{{end}}'
+
+  airflow.dependency:
+    cmds:
+      - cd airflow-helm && helm dependency update;
+
+  airflow.deploy:
+    deps: [set.k8s.context, airflow.dependency]
+    cmds:
+      - >
+        for f in ./helm-values/{{.ENV}}/*; do
+          helm upgrade airflow airflow-helm \
+            --namespace $NAMESPACE \
+            --install \
+            --atomic \
+            --cleanup-on-fail \
+            --force \
+            --history-max 3 \
+            --wait \
+            --set-string airflow.image.repository=airflow \
+            --set-string airflow.image.tag=latest \
+            --timeout 600s \
+            --values $f
+        done
+      - >
+        task airflow.connections.deploy
+
+  airflow.dags.deploy:
+    deps: [set.k8s.context]
+    cmds:
+      - kubectl -n $NAMESPACE cp dags/schduler_log_clean.py $AIRFLOW_POD_NAME:/usr/local/airflow/dags
+    env:
+      AIRFLOW_POD_NAME:
+        sh: kubectl -n $NAMESPACE get pods -o jsonpath="{.items[0].metadata.name}" -l app=airflow || echo "no connection"
+
+  airflow.undeploy:
+    deps: [set.k8s.context]
+    cmds:
+      - helm uninstall --namespace $NAMESPACE airflow
+
+
+  set.k8s.context:
+    cmds:
+      - kubectl config set-context {{.KUBE_CONTEXT}} --namespace=$NAMESPACE
+      - kubectl config use-context {{.KUBE_CONTEXT}} --namespace=$NAMESPACE
+
+  k8s.deploy.rolebinding:
+    deps: [set.k8s.context]
+    cmds:
+      - kubectl -n $NAMESPACE apply -f k8s/rolebinding.yaml

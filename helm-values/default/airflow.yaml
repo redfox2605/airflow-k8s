@@ -1,0 +1,34 @@
+replicaCount: 1
+airflow:
+  image:
+    repository: airflow:latest
+    tag: latest
+    pull_policy: Always
+  executor: Local
+  service:
+    type: ClusterIP
+    externalPort: 80
+  config:
+    AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: airflow:latest
+    AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: latest
+    AIRFLOW__KUBERNETES__WORKER_CONTAINER_IMAGE_PULL_POLICY: Always
+
+    AIRFLOW__KUBERNETES__NAMESPACE: default
+
+    ENV: default
+
+postgresql:
+  enabled: true
+  postgresqlUsername: airflow
+  postgresqlDatabase: airflow
+  postgresqlPassword: airflow
+
+logsPersistence:
+  accessMode: ReadWriteOnce
+  size: 4Gi
+
+web:
+  initialDelaySeconds: "30"
+
+serviceAccount:
+  name: airflow
