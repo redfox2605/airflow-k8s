@@ -1,0 +1,16 @@
+data
+output
+Pipfile
+Pipfile.lock
+connections.pkl
+node_modules
+.idea
+terraform
+venv
+docs
+config.mk
+configure
+.env
+.git
+.gitignore
+README.md

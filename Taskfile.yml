@@ -1,15 +1,28 @@
-# https://taskfile.dev
-
 version: '2'
+
 vars:
   KUBE_CONTEXT: '{{default "minikube" .KUBE_CONTEXT}}'
-  ENV: '{{default "minikube" .ENV}}'
-env:
-  PROJECT_NAME: k8s-airflow
-  ENV: '{{.ENV}}'
   NAMESPACE: '{{default "default" .NAMESPACE}}'
+  ENV: '{{default "local" .ENV}}'
+  AWS_ACCOUNT_ID: '{{default "000000000000" .AWS_ACCOUNT_ID}}'
+  AIRFLOW_SERVICE: airflow
+  DOCKER_IMAGE: airflow
+  COMMIT:
+    sh: git rev-parse --short HEAD
+
+env:
+  REMOTE_DAG_FOLDER: /opt/airflow
+  ENV: '{{.ENV}}'
+  NAMESPACE: '{{.NAMESPACE}}'
+
 
 tasks:
+
+
+  set.k8s.context:
+    cmds:
+      - kubectl config set-context {{.KUBE_CONTEXT}} --namespace={{.NAMESPACE}}
+      - kubectl config use-context {{.KUBE_CONTEXT}} --namespace={{.NAMESPACE}}
 
   run.local:
     cmds:
@@ -20,6 +33,11 @@ tasks:
         task k8s.deploy.rolebinding;
         task airflow.deploy;
         task airflow.dags.deploy;
+        task forward;
+
+  forward:
+    cmds:
+      - sh scripts/forward.sh
 
   start.minikube:
     cmds:
@@ -33,54 +51,114 @@ tasks:
   docker.build:
     deps: [set.k8s.context]
     cmds:
-      - docker build -t airflow:latest .
-      - '{{if ne .KUBE_CONTEXT "minikube"}}docker push airflow:latest{{end}}'
+      - docker build -t {{.DOCKER_IMAGE}}:{{.COMMIT}} .
+
+  docker.push:
+    deps: [set.k8s.context]
+    cmds:
+      - docker push {{.DOCKER_IMAGE}}:{{.COMMIT}}
+      - docker tag  {{.DOCKER_IMAGE}}:{{.COMMIT}} {{.DOCKER_IMAGE}}:latest
+      - docker push {{.DOCKER_IMAGE}}:latest
 
   airflow.dependency:
     cmds:
       - cd airflow-helm && helm dependency update;
 
   airflow.deploy:
-    deps: [set.k8s.context, airflow.dependency]
+    deps: [set.k8s.context]
     cmds:
       - >
-        for f in ./helm-values/{{.ENV}}/*; do
-          helm upgrade airflow airflow-helm \
+        helm upgrade {{.AIRFLOW_SERVICE}} airflow-helm \
             --namespace $NAMESPACE \
             --install \
             --atomic \
             --cleanup-on-fail \
-            --force \
             --history-max 3 \
+            --force \
             --wait \
-            --set-string airflow.image.repository=airflow \
+            --set-string airflow.image.repository={{.DOCKER_IMAGE}} \
             --set-string airflow.image.tag=latest \
             --timeout 600s \
-            --values $f
-        done
+            --values ./helm-values/{{.ENV}}/airflow.yaml;
+      - task airflow.connections.deploy
+      - task airflow.dags.deploy
+
+
+    vars:
+      AWS_REGION: eu-west-1
+
+  airflow.connections.deploy:
+    cmds:
       - >
-        task airflow.connections.deploy
+        kubectl exec deploy/{{.AIRFLOW_SERVICE}}  -- airflow connections add aws_connection \
+            --conn-type aws \
+            --conn-extra='{"region_name":"{{.AWS_REGION}}", "role_arn":"My IAM role"'
+    vars:
+      AWS_REGION: 'eu-west-1'
+
+  airflow.connections.undeploy:
+    cmds:
+      - >
+        kubectl exec deploy/{{.AIRFLOW_SERVICE}}  -- airflow connections delete aws_connection
+    vars:
+      AWS_REGION: 'eu-west-1'
+
+  ##### DAGS operations
+  airflow.deploy.dag:
+    cmds:
+      - >
+        kubectl -n $NAMESPACE cp dags/{{.DAG_NAME}}.py $AIRFLOW_POD_NAME:$REMOTE_DAG_FOLDER/dags/{{.DAG_NAME}}.py
+    env:
+      DAG_NAME: '{{default "__TO_BE_SET__" .DAG_NAME}}'
+      AIRFLOW_POD_NAME:
+        sh: kubectl -n $NAMESPACE get pods -o jsonpath="{.items[0].metadata.name}" -l app={{.AIRFLOW_SERVICE}} || echo "no connection"
 
   airflow.dags.deploy:
-    deps: [set.k8s.context]
     cmds:
-      - kubectl -n $NAMESPACE cp dags/schduler_log_clean.py $AIRFLOW_POD_NAME:/usr/local/airflow/dags
-    env:
+      - >
+        {{range $d := .DAG_NAMES | trim | splitLines -}}
+            DAG_NAME={{$d}} task airflow.deploy.dag
+        {{end}}
+    vars:
       AIRFLOW_POD_NAME:
-        sh: kubectl -n $NAMESPACE get pods -o jsonpath="{.items[0].metadata.name}" -l app=airflow || echo "no connection"
+        sh: kubectl -n $NAMESPACE get pods -o jsonpath="{.items[0].metadata.name}" -l app={{.AIRFLOW_SERVICE}} || echo "no connection"
+      DAG_NAMES: |-
+        clean_logs
+        test_athena_operator
+        test_kubernetes_operator
+
+  airflow.dags.undeploy:
+    cmds:
+      - kubectl exec deploy/{{.AIRFLOW_SERVICE}}  -- sh -c "rm -rfv ${REMOTE_DAG_FOLDER}/dags/*.py"
 
   airflow.undeploy:
     deps: [set.k8s.context]
     cmds:
-      - helm uninstall --namespace $NAMESPACE airflow
+      - task airflow.connections.undeploy
+      - helm uninstall --namespace $NAMESPACE {{.AIRFLOW_SERVICE}}
 
-
-  set.k8s.context:
+  airflow.deploy.secrets:
+    deps: [set.k8s.context]
     cmds:
-      - kubectl config set-context {{.KUBE_CONTEXT}} --namespace=$NAMESPACE
-      - kubectl config use-context {{.KUBE_CONTEXT}} --namespace=$NAMESPACE
+      - |
+        kubectl create secret generic airflow \
+          --from-literal=fernet_key={{if eq .ENV "prod"}}${FERTNET_KEY_PROD}{else if eq .ENV "dev"}}${FERTNET_KEY_DEV}{{else}}${FERTNET_KEY_DEV}{{end}} \
+          --from-literal=gitlab_token=${AIRFLOW_GITLAB_TOKEN}
 
   k8s.deploy.rolebinding:
     deps: [set.k8s.context]
     cmds:
       - kubectl -n $NAMESPACE apply -f k8s/rolebinding.yaml
+
+#### usefull local commands
+  airflow.dags.deploy.dev:
+    cmds:
+      - >
+        kubectl -n default get pods -o jsonpath="{.items[0].metadata.name}" -l
+        app={{.AIRFLOW_SERVICE}} | xargs -I {} kubectl -n default cp dags/. {}:/opt/airflow/dags
+
+  airflow.dags.deploy.prod:
+    cmds:
+      - >
+        kubectl -n default get pods -o jsonpath="{.items[0].metadata.name}" -l
+        app={{.AIRFLOW_SERVICE}} | xargs -I {} kubectl -n default cp dags/. {}:/opt/airflow/dags

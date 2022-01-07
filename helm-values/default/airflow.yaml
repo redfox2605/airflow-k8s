@@ -1,5 +1,6 @@
 replicaCount: 1
 airflow:
+  iam: <My role for default namespace>
   image:
     repository: airflow:latest
     tag: latest
@@ -13,15 +14,29 @@ airflow:
     AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: latest
     AIRFLOW__KUBERNETES__WORKER_CONTAINER_IMAGE_PULL_POLICY: Always
 
-    AIRFLOW__KUBERNETES__NAMESPACE: default
+    AIRFLOW__KUBERNETES__NAMESPACE: default # kubernetes namespace
+    AIRFLOW__EMAIL__EMAIL_BACKEND: "airflow.utils.email.send_email_smtp"
+    AIRFLOW__SMTP__SMTP_HOST: "localhost"
+    AIRFLOW__SMTP__SMTP_STARTTLS: "False"
+    AIRFLOW__SMTP__SMTP_SSL: "False"
+    AIRFLOW__SMTP__SMTP_PORT: "1025"
+    AIRFLOW__SMTP__SMTP_FROM_NAME: "Airflow"
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: "myairflow@mydomain.tech"
+    AWS_DEFAULT_REGION: eu-west-1
 
     ENV: default
 
+  # Reads from previously created secrets
+  secrets:
+    AIRFLOW__CORE__FERNET_KEY:
+      name: airflow
+      key: fernet_key
+
 postgresql:
   enabled: true
-  postgresqlUsername: airflow
-  postgresqlDatabase: airflow
-  postgresqlPassword: airflow
+  postgresqlUsername: <Read from secrets>
+  postgresqlDatabase: <Read from secrets>
+  postgresqlPassword: <Read from secrets>
 
 logsPersistence:
   accessMode: ReadWriteOnce

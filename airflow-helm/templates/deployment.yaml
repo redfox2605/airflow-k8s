@@ -8,7 +8,12 @@ metadata:
     helm.sh/chart: {{ include "airflow-helm.chart" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
+    tags.datadoghq.com/env: "{{ .Values.airflow.config.ENV }}"
+    tags.datadoghq.com/service: "mytag.for.this.service"
+    tags.datadoghq.com/version: "2.0.0"
+
   annotations:
+    downscaler/exclude: "true"
     kubernetes.io/change-cause: "{{ .Values.airflow.image.repository }}:{{ .Values.airflow.image.tag }}"
     downscaler/uptime: always
 spec:
@@ -26,6 +31,11 @@ spec:
         app: {{ .Release.Name }}
         app.kubernetes.io/name: {{ .Release.Name }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+        tags.datadoghq.com/env: "{{ .Values.airflow.config.ENV }}"
+        tags.datadoghq.com/service: "mytag.for.this.service"
+        tags.datadoghq.com/version: "2.0.0"
+      annotations:
+         iam.amazonaws.com/role: {{ .Values.airflow.iam }}
     spec:
       containers:
       - name: {{ .Release.Name }}
@@ -34,8 +44,12 @@ spec:
         ports:
         - containerPort: 8080
         volumeMounts:
-        - mountPath: /usr/local/airflow
+        - mountPath: /opt/airflow
           name: {{ .Release.Name }}
+        - name: {{ .Release.Name }}-configmap
+          mountPath: /opt/airflow/webserver_config.py
+          subPath: webserver_config.py
+          readOnly: true
         args:
         - webserver
         env:
@@ -43,22 +57,27 @@ spec:
           - name: {{ $key }}
             value: {{ $val | quote }}
 {{- end}}
+{{- range $key, $val := .Values.airflow.secrets }}
+          - name: {{ $key }}
+            valueFrom:
+              secretKeyRef:
+                name: {{ $val.name }}
+                key: {{ $val.key }}
+{{- end}}
         resources:
 {{ toYaml .Values.airflow.resources | indent 12 }}
         lifecycle:
           postStart:
             exec:
-              command: ["/bin/sh", "-c", "mkdir -p /usr/local/airflow/dags"]
+              command: ["/bin/sh", "-c", "mkdir -p /opt/airflow/dags", "/opt/airflow/repos"]
         livenessProbe:
           failureThreshold: 5
-          httpGet:
-            path: /health
-            port: 8080
-            scheme: HTTP
           initialDelaySeconds: {{ .Values.web.initialDelaySeconds }}
           periodSeconds: 60
           successThreshold: 1
           timeoutSeconds: 1
+          exec:
+            command: ["python3", "-Wignore", "/tmp/health_check.py"]
         readinessProbe:
           failureThreshold: 5
           httpGet:
@@ -69,12 +88,22 @@ spec:
           periodSeconds: 60
           successThreshold: 1
           timeoutSeconds: 1
-
+      - name: aws-sfmtp-relay
+        image: "{{ .Values.aws_smtp_relay.image.repository }}:{{ .Values.aws_smtp_relay.image.tag }}"
+        imagePullPolicy: {{ .Values.aws_smtp_relay.image.pull_policy }}
+        args: ["-e", "airflow"]
+        ports:
+          - containerPort: 1025
+        env:
+          - name: AWS_REGION
+            value: {{ .Values.aws_smtp_relay.AWS_REGION }}
       volumes:
       - name: {{ .Release.Name }}
         persistentVolumeClaim:
           claimName: {{ .Release.Name }}
-
+      - name: {{ .Release.Name }}-configmap
+        configMap:
+          name: {{ .Release.Name }}-configmap
       restartPolicy: Always
       serviceAccountName: {{.Values.serviceAccount.name }}
       hostname: {{ .Release.Name }}

@@ -17,15 +17,13 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-This is an example dag for using the Kubernetes Executor.
+Dag cleans logs from airflow
 """
-import os
 
 import airflow
 from airflow.models import DAG
-from airflow.operators.python_operator import PythonOperator
-from airflow.contrib.operators.kubernetes_pod_operator import KubernetesPodOperator
 from airflow.operators.bash_operator import BashOperator
+from airflow.operators.python import PythonOperator
 
 args = {
     'owner': 'Airflow',
@@ -33,7 +31,7 @@ args = {
 }
 
 with DAG(
-    dag_id='schduler_log_clean',
+    dag_id='airflow_log_clean',
     default_args=args,
     schedule_interval='0 0 * * *'
 ) as dag:
@@ -44,17 +42,15 @@ with DAG(
         'value': 'airflow'
     }]
 
-    def print_stuff():  # pylint: disable=missing-docstring
-        print("hello world!")
+    def print_message():
+        print("Cleanning logs...")
 
-    one_task = PythonOperator(
+    first_task = PythonOperator(
         task_id="one_task",
-        python_callable=print_stuff
+        python_callable=print_message
     )
-
-    # Use the zip binary, which is only found in this special docker image
-    two_task = BashOperator(
+    clean_logs = BashOperator(
         task_id='two_task',
-        bash_command='find /usr/local/airflow/logs -type f -mtime +2 -exec rm -f {} \;')
+        bash_command='find /opt/airflow/logs -type f -mtime +2 -exec rm -f {} \;')  # NOQA
 
-    [one_task, two_task]
+    [first_task, clean_logs]
